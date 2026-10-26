@@ -1,0 +1,78 @@
+name: Extract Store ZIP
+
+on:
+  push:
+    paths:
+      - '*.zip'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract ZIP safely into repository root
+        shell: bash
+        run: |
+          python - <<'PY'
+          import shutil
+          import zipfile
+          from pathlib import Path, PurePosixPath
+
+          root = Path.cwd()
+          archives = sorted(
+              (p for p in root.glob('*.zip') if p.is_file()),
+              key=lambda p: p.stat().st_mtime,
+              reverse=True,
+          )
+          if not archives:
+              raise SystemExit('ERROR: Upload the project ZIP to the repository root first.')
+
+          archive = archives[0]
+          with zipfile.ZipFile(archive) as z:
+              files = [n for n in z.namelist() if not n.endswith('/')]
+              if not files:
+                  raise SystemExit('ERROR: The ZIP contains no files.')
+
+              parsed = [PurePosixPath(n) for n in files]
+              for p in parsed:
+                  if p.is_absolute() or '..' in p.parts:
+                      raise SystemExit(f'ERROR: Unsafe ZIP path: {p}')
+
+              # If every file is inside the same wrapper folder, remove that folder.
+              first_parts = [p.parts for p in parsed]
+              strip_prefix = (
+                  bool(first_parts)
+                  and all(len(parts) > 1 and parts[0] == first_parts[0][0]
+                          for parts in first_parts)
+              )
+              prefix = first_parts[0][0] if strip_prefix else None
+
+              for name, p in zip(files, parsed):
+                  parts = p.parts[1:] if prefix else p.parts
+                  if not parts:
+                      continue
+                  target = root.joinpath(*parts)
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  with z.open(name) as src, target.open('wb') as dst:
+                      shutil.copyfileobj(src, dst)
+
+          print(f'Extracted {archive.name} into repository root.')
+          PY
+
+      - name: Commit extracted project files
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A -- . ':!*.zip'
+          if git diff --cached --quiet; then
+            echo "No extracted changes to commit."
+          else
+            git commit -m "Auto-extract SADEE PRO STORE ZIP"
+            git push
+          fi
