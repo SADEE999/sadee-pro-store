@@ -1,0 +1,111 @@
+
+name: Extract Store ZIP
+
+on:
+  push:
+    paths:
+      - "*.zip"
+      - "**/*.zip"
+      - ".github/workflows/extract-zip.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract ZIP safely
+        run: |
+          python - <<'PY'
+          import shutil
+          import zipfile
+          from pathlib import Path, PurePosixPath
+
+          root = Path.cwd()
+          output = root / "site"
+
+          archives = sorted(
+              [
+                  p for p in root.rglob("*.zip")
+                  if ".git" not in p.parts
+                  and "site" not in p.parts
+              ],
+              key=lambda p: p.stat().st_mtime,
+              reverse=True
+          )
+
+          if not archives:
+              raise SystemExit(
+                  "ERROR: Upload a ZIP file to the repository first."
+              )
+
+          archive = archives[0]
+          print(f"Extracting: {archive.relative_to(root)}")
+
+          if output.exists():
+              shutil.rmtree(output)
+          output.mkdir(parents=True)
+
+          with zipfile.ZipFile(archive) as z:
+              files = [
+                  n for n in z.namelist()
+                  if not n.endswith("/")
+              ]
+
+              paths = [PurePosixPath(n) for n in files]
+              if any(
+                  p.is_absolute() or ".." in p.parts
+                  for p in paths
+              ):
+                  raise SystemExit("Unsafe path found in ZIP.")
+
+              # Remove one shared top-level folder if present.
+              strip = (
+                  bool(paths)
+                  and all(
+                      len(p.parts) > 1
+                      and p.parts[0] == paths[0].parts[0]
+                      for p in paths
+                  )
+              )
+
+              for name, p in zip(files, paths):
+                  parts = p.parts[1:] if strip else p.parts
+                  if not parts:
+                      continue
+
+                  target = output.joinpath(*parts)
+                  target.parent.mkdir(
+                      parents=True, exist_ok=True
+                  )
+
+                  with z.open(name) as src, target.open("wb") as dst:
+                      shutil.copyfileobj(src, dst)
+
+          if not (output / "index.html").exists():
+              raise SystemExit(
+                  "ERROR: index.html not found at site root."
+              )
+
+          print("SUCCESS: Website extracted into site/")
+          PY
+
+      - name: Commit extracted website
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -f site/
+
+          if git diff --cached --quiet; then
+            echo "No new extracted changes."
+          else
+            git commit -m "Auto-extract website ZIP"
+            git push
+          fi
