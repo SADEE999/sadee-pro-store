@@ -1,0 +1,49 @@
+name: Extract Store ZIP
+on:
+  push:
+    paths: ['*.zip', '**/*.zip']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract website and secure server functions
+        shell: bash
+        run: |
+          python - <<'PY'
+          import shutil, zipfile
+          from pathlib import Path, PurePosixPath
+          root=Path.cwd()
+          archives=sorted((p for p in root.glob('*.zip') if p.is_file()),key=lambda p:p.stat().st_mtime,reverse=True)
+          if not archives: raise SystemExit('ERROR: Upload the project ZIP to repository root.')
+          with zipfile.ZipFile(archives[0]) as z:
+            names=[n for n in z.namelist() if not n.endswith('/')]
+            paths=[PurePosixPath(n) for n in names]
+            for p in paths:
+              if p.is_absolute() or '..' in p.parts: raise SystemExit(f'Unsafe ZIP path: {p}')
+            wrapper=paths[0].parts[0] if paths[0].parts else None
+            strip=bool(wrapper) and all(len(p.parts)>1 and p.parts[0]==wrapper for p in paths)
+            site=root/'site'; shutil.rmtree(site,ignore_errors=True); site.mkdir()
+            funcs=root/'netlify'/'functions'; shutil.rmtree(funcs,ignore_errors=True); funcs.mkdir(parents=True)
+            for name,p in zip(names,paths):
+              parts=p.parts[1:] if strip else p.parts
+              if not parts or parts[0]=='.github': continue
+              if parts[:2]==('netlify','functions'):
+                target=funcs.joinpath(*parts[2:]); target.parent.mkdir(parents=True,exist_ok=True)
+              elif parts[0]=='netlify' and len(parts)>1: continue
+              else:
+                target=site.joinpath(*parts); target.parent.mkdir(parents=True,exist_ok=True)
+              with z.open(name) as src,target.open('wb') as dst: shutil.copyfileobj(src,dst)
+          if not (site/'index.html').is_file(): raise SystemExit('ERROR: index.html missing from ZIP.')
+          (root/'netlify.toml').write_text('[build]\n  publish = "site"\n  command = ""\n[functions]\n  directory = "netlify/functions"\n')
+          print('Website and Netlify Functions extracted.')
+          PY
+      - name: Commit extracted site and functions
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f site/ netlify/functions/ netlify.toml
+          if git diff --cached --quiet; then echo "No extracted changes."; else git commit -m "Deploy SADEE PRO STORE eZ Cash orders"; git push; fi
