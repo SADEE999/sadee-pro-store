@@ -1,12 +1,10 @@
-
-name: Extract Store ZIP
+name: Extract SADEE PRO STORE ZIP
 
 on:
   push:
     paths:
       - "*.zip"
       - "**/*.zip"
-      - ".github/workflows/extract-zip.yml"
   workflow_dispatch:
 
 permissions:
@@ -20,92 +18,92 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Extract ZIP safely
+      - name: Extract website files
+        shell: bash
         run: |
           python - <<'PY'
-          import shutil
           import zipfile
+          import shutil
           from pathlib import Path, PurePosixPath
 
           root = Path.cwd()
-          output = root / "site"
-
           archives = sorted(
-              [
-                  p for p in root.rglob("*.zip")
-                  if ".git" not in p.parts
-                  and "site" not in p.parts
-              ],
+              [p for p in root.glob("*.zip") if p.is_file()],
               key=lambda p: p.stat().st_mtime,
               reverse=True
           )
 
           if not archives:
-              raise SystemExit(
-                  "ERROR: Upload a ZIP file to the repository first."
-              )
+              raise SystemExit("Upload the final ZIP to repository root.")
 
           archive = archives[0]
-          print(f"Extracting: {archive.relative_to(root)}")
-
-          if output.exists():
-              shutil.rmtree(output)
-          output.mkdir(parents=True)
 
           with zipfile.ZipFile(archive) as z:
-              files = [
-                  n for n in z.namelist()
-                  if not n.endswith("/")
-              ]
+              files = [n for n in z.namelist() if not n.endswith("/")]
 
               paths = [PurePosixPath(n) for n in files]
-              if any(
-                  p.is_absolute() or ".." in p.parts
-                  for p in paths
-              ):
-                  raise SystemExit("Unsafe path found in ZIP.")
 
-              # Remove one shared top-level folder if present.
-              strip = (
-                  bool(paths)
-                  and all(
-                      len(p.parts) > 1
-                      and p.parts[0] == paths[0].parts[0]
-                      for p in paths
-                  )
+              for p in paths:
+                  if p.is_absolute() or ".." in p.parts:
+                      raise SystemExit(f"Unsafe ZIP path: {p}")
+
+              first = paths[0].parts[0] if paths[0].parts else ""
+              strip = bool(first) and all(
+                  len(p.parts) > 1 and p.parts[0] == first
+                  for p in paths
               )
 
-              for name, p in zip(files, paths):
-                  parts = p.parts[1:] if strip else p.parts
-                  if not parts:
+              site = root / "site"
+              functions = root / "netlify" / "functions"
+
+              shutil.rmtree(site, ignore_errors=True)
+              shutil.rmtree(functions, ignore_errors=True)
+
+              site.mkdir(parents=True)
+              functions.mkdir(parents=True)
+
+              for name, path in zip(files, paths):
+                  parts = path.parts[1:] if strip else path.parts
+
+                  if not parts or parts[0] == ".github":
                       continue
 
-                  target = output.joinpath(*parts)
-                  target.parent.mkdir(
-                      parents=True, exist_ok=True
-                  )
+                  if parts[:2] == ("netlify", "functions"):
+                      target = functions.joinpath(*parts[2:])
+                  elif parts[0] == "netlify":
+                      continue
+                  else:
+                      target = site.joinpath(*parts)
+
+                  target.parent.mkdir(parents=True, exist_ok=True)
 
                   with z.open(name) as src, target.open("wb") as dst:
                       shutil.copyfileobj(src, dst)
 
-          if not (output / "index.html").exists():
-              raise SystemExit(
-                  "ERROR: index.html not found at site root."
-              )
+          if not (site / "index.html").exists():
+              raise SystemExit("ERROR: index.html not found.")
 
-          print("SUCCESS: Website extracted into site/")
+          (root / "netlify.toml").write_text(
+              '[build]\n'
+              '  publish = "site"\n'
+              '  command = ""\n'
+              '[functions]\n'
+              '  directory = "netlify/functions"\n'
+          )
+
+          print("Website and functions extracted successfully.")
           PY
 
-      - name: Commit extracted website
+      - name: Commit extracted files
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add -f site/
+          git add -f site/ netlify/functions/ netlify.toml
 
           if git diff --cached --quiet; then
-            echo "No new extracted changes."
+            echo "No changes to commit."
           else
-            git commit -m "Auto-extract website ZIP"
+            git commit -m "Update SADEE PRO STORE website"
             git push
           fi
