@@ -1,4 +1,3 @@
-
 name: Extract Website ZIP
 
 on:
@@ -18,7 +17,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Extract ZIP safely
+      - name: Extract ZIP and find website
         shell: bash
         run: |
           python - <<'PY'
@@ -27,86 +26,120 @@ jobs:
           from pathlib import Path, PurePosixPath
 
           root = Path.cwd()
-          zips = sorted(
+          temp = root / "_website_extract_temp"
+
+          shutil.rmtree(temp, ignore_errors=True)
+          temp.mkdir(parents=True)
+
+          archives = sorted(
               root.glob("*.zip"),
               key=lambda p: p.stat().st_mtime,
               reverse=True
           )
 
-          if not zips:
-              raise SystemExit("ERROR: Upload a ZIP to the repository root.")
+          if not archives:
+              raise SystemExit(
+                  "ERROR: No ZIP file found in repository root."
+              )
 
-          archive = zips[0]
-          temp = root / "_zip_extract_temp"
-          shutil.rmtree(temp, ignore_errors=True)
-          temp.mkdir()
+          archive = archives[0]
+          print(f"Extracting: {archive.name}")
 
-          with zipfile.ZipFile(archive) as z:
-              members = []
+          with zipfile.ZipFile(archive, "r") as z:
               for info in z.infolist():
-                  p = PurePosixPath(info.filename)
+                  path = PurePosixPath(info.filename)
 
-                  if p.is_absolute() or ".." in p.parts:
-                      raise SystemExit("Unsafe ZIP path: " + info.filename)
+                  if path.is_absolute() or ".." in path.parts:
+                      raise SystemExit(
+                          f"Unsafe ZIP path: {info.filename}"
+                      )
 
                   if info.is_dir():
                       continue
 
-                  members.append((info, p))
+                  parts = path.parts
 
-              if not members:
-                  raise SystemExit("ERROR: ZIP is empty.")
+                  if not parts:
+                      continue
 
-              first_parts = [p.parts for _, p in members]
-              common = first_parts[0][0] if first_parts[0] else ""
-              strip_root = bool(common) and all(
-                  len(parts) > 1 and parts[0] == common
-                  for parts in first_parts
-              )
-
-              for info, p in members:
-                  parts = p.parts[1:] if strip_root else p.parts
-
-                  if not parts or parts[0] == ".github":
+                  if parts[0] == ".github":
                       continue
 
                   target = temp.joinpath(*parts)
-                  target.parent.mkdir(parents=True, exist_ok=True)
+                  target.parent.mkdir(
+                      parents=True,
+                      exist_ok=True
+                  )
 
-                  with z.open(info) as src, target.open("wb") as dst:
-                      shutil.copyfileobj(src, dst)
+                  with z.open(info) as src:
+                      with target.open("wb") as dst:
+                          shutil.copyfileobj(src, dst)
 
-          if not (temp / "index.html").is_file():
+          # Find index.html anywhere inside the extracted ZIP.
+          indexes = [
+              p for p in temp.rglob("index.html")
+              if p.is_file()
+          ]
+
+          if not indexes:
               raise SystemExit(
-                  "ERROR: index.html not found at ZIP website root. "
-                  "Check the ZIP folder structure."
+                  "ERROR: No index.html found inside the ZIP. "
+                  "Check whether the ZIP contains the website files."
               )
 
-          for item in temp.iterdir():
-              target = root / item.name
+          # Prefer the shallowest website index.html.
+          index_file = min(
+              indexes,
+              key=lambda p: (len(p.relative_to(temp).parts), str(p))
+          )
+
+          webroot = index_file.parent
+
+          print(f"Website root: {webroot}")
+          print(f"Found index: {index_file}")
+
+          # Copy website contents into the repository root.
+          for item in webroot.iterdir():
+              if item.name in {
+                  ".git",
+                  ".github",
+                  "_website_extract_temp"
+              }:
+                  continue
+
+              destination = root / item.name
 
               if item.is_dir():
-                  if target.exists():
-                      shutil.rmtree(target)
-                  shutil.copytree(item, target)
+                  if destination.exists():
+                      shutil.rmtree(destination)
+
+                  shutil.copytree(item, destination)
               else:
-                  shutil.copy2(item, target)
+                  shutil.copy2(item, destination)
 
           shutil.rmtree(temp, ignore_errors=True)
-          print("ZIP extracted. index.html is in repository root.")
+
+          if not (root / "index.html").is_file():
+              raise SystemExit(
+                  "ERROR: index.html was not copied to repository root."
+              )
+
+          print("SUCCESS: Website files copied to repository root.")
           PY
 
-      - name: Commit extracted website
+      - name: Commit website files
+        shell: bash
         run: |
           git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
 
           git add -A
           git reset -- '*.zip'
 
           if git diff --cached --quiet; then
-            echo "No extracted changes to commit."
+            echo "No changes to commit."
           else
-            git commit -m "Extract website ZIP"
+            git commit -m "Deploy website files from ZIP"
             git push
           fi
